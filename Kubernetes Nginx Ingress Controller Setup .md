@@ -1,346 +1,176 @@
-# **Kubernetes Nginx Ingress Controller Setup Guide**
+# NGINX Ingress Controller Deployment
 
-## **Overview**
-This guide provides step-by-step instructions for installing and configuring an Nginx Ingress Controller on a Kubernetes cluster master node. The setup allows external access to services running in your Kubernetes cluster.
+This repository contains a complete Kubernetes manifest for deploying an NGINX Ingress Controller using DaemonSet with `hostNetwork` mode, along with an example backend application.
 
-## **Prerequisites**
-- Kubernetes cluster with master node
-- `kubectl` configured to access the cluster
-- Master node IP address
-- Cluster admin permissions
+## 📋 Overview
 
-## **Installation Steps**
+The deployment consists of seven Kubernetes resources that work together to provide ingress capabilities to your cluster:
 
-### **1. Create Deployment YAML**
+1. **Namespace** - Isolates ingress-nginx components
+2. **ServiceAccount** - Provides identity for the ingress controller
+3. **ClusterRole** - Defines RBAC permissions
+4. **ClusterRoleBinding** - Binds permissions to the service account
+5. **IngressClass** - Defines the ingress controller class
+6. **DaemonSet** - Deploys NGINX ingress controller pods on each node
+7. **Deployment** - Example backend application for testing
 
-Create `nginx-ingress.yaml`:
+## 🚀 Features
+
+- **DaemonSet Deployment**: Runs one ingress controller pod on each cluster node
+- **Host Network Mode**: Uses `hostNetwork: true` for direct node port access
+- **RBAC Configuration**: Proper security permissions for Kubernetes API access
+- **IngressClass Support**: Uses modern IngressClass API (networking.k8s.io/v1)
+- **Example App**: Includes a demo nginx application for testing
+
+## 📁 File Structure
+
+```
+ingress-nginx-manifest.yaml
+README.md
+```
+
+## 🔧 Prerequisites
+
+- Kubernetes cluster (v1.19+ recommended)
+- `kubectl` configured with cluster access
+- Cluster nodes with ports 80 and 443 available
+- Access to pull images from `registry.k8s.io`
+
+## 🛠️ Installation
+
+1. **Apply the manifest**:
+   ```bash
+   kubectl apply -f ingress-nginx-manifest.yaml
+   ```
+
+2. **Verify deployment**:
+   ```bash
+   # Check all resources are created
+   kubectl get all -n ingress-nginx
+   
+   # Check DaemonSet pods
+   kubectl get pods -n ingress-nginx -o wide
+   
+   # Check the example app
+   kubectl get deployment demo-app -n default
+   ```
+
+## 🌐 Network Configuration
+
+The ingress controller uses `hostNetwork: true`, which means:
+- Pods run directly on the node's network namespace
+- No Service LoadBalancer or NodePort is needed
+- Controller binds to ports 80 and 443 on each node's IP
+- Direct access via any node's IP address
+
+### Ports Exposed:
+- **Port 80**: HTTP traffic
+- **Port 443**: HTTPS traffic
+
+## 📝 Usage Example
+
+Once deployed, you can create an Ingress resource to route traffic to the demo application:
+
 ```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ingress-nginx
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nginx-ingress
-  namespace: ingress-nginx
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: nginx-ingress
-  template:
-    metadata:
-      labels:
-        app: nginx-ingress
-    spec:
-      tolerations:
-      - key: "node-role.kubernetes.io/master"
-        operator: "Exists"
-        effect: "NoSchedule"
-      - key: "node-role.kubernetes.io/control-plane"
-        operator: "Exists"
-        effect: "NoSchedule"
-      containers:
-      - name: nginx
-        image: nginx:alpine
-        ports:
-        - containerPort: 80
-        - containerPort: 443
-        volumeMounts:
-        - name: nginx-config
-          mountPath: /etc/nginx/nginx.conf
-          subPath: nginx.conf
-      volumes:
-      - name: nginx-config
-        configMap:
-          name: nginx-config
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: nginx-config
-  namespace: ingress-nginx
-data:
-  nginx.conf: |
-    events {}
-    http {
-      server {
-        listen 80;
-        location / {
-          return 200 "NGINX Ingress Controller is working!\n";
-        }
-        location /healthz {
-          return 200 "healthy\n";
-        }
-      }
-    }
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: nginx-ingress-service
-  namespace: ingress-nginx
-spec:
-  type: NodePort
-  selector:
-    app: nginx-ingress
-  ports:
-  - name: http
-    port: 80
-    targetPort: 80
-  - name: https
-    port: 443
-    targetPort: 443
-```
-
-### **2. Apply the Configuration**
-```bash
-kubectl apply -f nginx-ingress.yaml
-```
-
-### **3. Check Installation Status**
-```bash
-kubectl get all -n ingress-nginx
-```
-Expected output:
-```
-NAME                                 READY   STATUS    RESTARTS   AGE
-pod/nginx-ingress-xxxxxxxxxx-xxxxx   1/1     Running   0          1m
-
-NAME                            TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)                      AGE
-service/nginx-ingress-service   NodePort   10.XXX.XXX.XXX  <none>        80:3XXXX/TCP,443:3XXXX/TCP   1m
-
-NAME                            READY   UP-TO-DATE   AVAILABLE   AGE
-deployment.apps/nginx-ingress   1/1     1            1           1m
-```
-
-## **Accessing the Ingress Controller**
-
-### **Get Access Information**
-```bash
-# Get Master Node IP
-MASTER_IP=$(kubectl get node k8s-master -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-
-# Get NodePort
-NODE_PORT=$(kubectl get svc nginx-ingress-service -n ingress-nginx -o jsonpath='{.spec.ports[0].nodePort}')
-
-echo "Access URL: http://$MASTER_IP:$NODE_PORT"
-```
-
-### **Test the Ingress Controller**
-```bash
-# Basic test
-curl http://$MASTER_IP:$NODE_PORT
-
-# Health check
-curl http://$MASTER_IP:$NODE_PORT/healthz
-```
-
-## **Troubleshooting**
-
-### **Common Issues and Solutions**
-
-#### **1. Pod Stuck in "Pending" State**
-**Problem**: Pod cannot be scheduled due to node taints
-```bash
-# Check taints on master node
-kubectl describe node k8s-master | grep -i taint
-
-# Remove taints if present
-kubectl taint nodes k8s-master node-role.kubernetes.io/control-plane-
-kubectl taint nodes k8s-master node-role.kubernetes.io/master-
-```
-
-#### **2. "Connection Refused" Error**
-**Problem**: Using wrong port number
-```bash
-# Always use NodePort, not port 80
-# Correct: http://<IP>:<NodePort>
-# Wrong: http://<IP>:80
-
-# Get the actual NodePort
-kubectl get svc nginx-ingress-service -n ingress-nginx
-```
-
-#### **3. Pod Running but Not Accessible**
-**Problem**: Service selector doesn't match pod labels
-```bash
-# Check service selector
-kubectl describe svc nginx-ingress-service -n ingress-nginx | grep Selector
-
-# Check pod labels
-kubectl get pod -n ingress-nginx --show-labels
-
-# They must match: app=nginx-ingress
-```
-
-### **Diagnostic Commands**
-```bash
-# Check pod logs
-kubectl logs -n ingress-nginx deployment/nginx-ingress
-
-# Check service details
-kubectl describe svc nginx-ingress-service -n ingress-nginx
-
-# Check endpoints
-kubectl get endpoints -n ingress-nginx
-
-# Test from inside cluster
-kubectl run test-curl --image=curlimages/curl --restart=Never --rm -it -- curl http://nginx-ingress-service.ingress-nginx:80
-```
-
-## **Using Ingress Rules**
-
-### **Create a Sample Application**
-```yaml
-# sample-app.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: web-app
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: web
-  template:
-    metadata:
-      labels:
-        app: web
-    spec:
-      containers:
-      - name: web
-        image: nginx:alpine
-        ports:
-        - containerPort: 80
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: web-service
-spec:
-  selector:
-    app: web
-  ports:
-  - port: 80
-    targetPort: 80
-```
-
-### **Create Ingress Resource**
-```yaml
-# web-ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: web-ingress
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+  name: demo-ingress
+  namespace: default
 spec:
   ingressClassName: nginx
   rules:
-  - http:
+  - host: demo.example.com
+    http:
       paths:
-      - path: /web
+      - path: /
         pathType: Prefix
         backend:
           service:
-            name: web-service
+            name: demo-service
             port:
               number: 80
 ```
 
-### **Apply and Test**
+You'll need to create a corresponding Service for the demo app:
 ```bash
-# Deploy application and ingress
-kubectl apply -f sample-app.yaml
-kubectl apply -f web-ingress.yaml
-
-# Test the ingress route
-curl http://$MASTER_IP:$NODE_PORT/web
+kubectl expose deployment demo-app --port=80 --target-port=80 --name=demo-service -n default
 ```
 
-## **Configuration Options**
+## 🔒 Security Notes
 
-### **Custom Nginx Configuration**
-Edit the ConfigMap to modify nginx settings:
+1. **Privileged Execution**: The controller runs as root (`runAsUser: 0`) with privilege escalation enabled
+2. **Host Network**: Pods have access to the host network stack
+3. **Cluster-wide Permissions**: Service account has read access to cluster resources
+
+**Consider for production**:
+- Add resource limits and requests
+- Implement Pod Security Standards
+- Configure TLS certificates
+- Add monitoring and logging
+- Consider using a dedicated node pool for ingress controllers
+
+## 🧹 Cleanup
+
+To remove all resources:
 ```bash
-kubectl edit configmap nginx-config -n ingress-nginx
+kubectl delete -f ingress-nginx-manifest.yaml
 ```
 
-### **Change NodePort**
-To use a specific NodePort:
+Or delete individually:
 ```bash
-kubectl edit svc nginx-ingress-service -n ingress-nginx
-```
-Change:
-```yaml
-ports:
-- name: http
-  port: 80
-  targetPort: 80
-  nodePort: 30080  # Your desired port (30000-32767)
-```
-
-### **Scale the Deployment**
-```bash
-# Increase replicas for high availability
-kubectl scale deployment nginx-ingress -n ingress-nginx --replicas=2
-```
-
-## **Maintenance**
-
-### **Update Nginx Image**
-```bash
-kubectl set image deployment/nginx-ingress nginx=nginx:latest -n ingress-nginx
-```
-
-### **Delete Everything**
-```bash
+kubectl delete deployment demo-app -n default
+kubectl delete daemonset nginx-ingress-controller -n ingress-nginx
+kubectl delete ingressclass nginx
+kubectl delete clusterrolebinding nginx-ingress
+kubectl delete clusterrole nginx-ingress
+kubectl delete serviceaccount nginx-ingress -n ingress-nginx
 kubectl delete namespace ingress-nginx
 ```
 
-### **Monitor Resources**
-```bash
-# Monitor pod resource usage
-kubectl top pods -n ingress-nginx
+## 📊 Verification
 
-# Check events
-kubectl get events -n ingress-nginx --sort-by='.lastTimestamp'
+Test the ingress controller:
+```bash
+# Get node IP addresses
+kubectl get nodes -o wide
+
+# Test HTTP access (replace NODE_IP with actual node IP)
+curl -H "Host: demo.example.com" http://NODE_IP/
+
+# Check controller logs
+kubectl logs -n ingress-nginx -l app=nginx-ingress
 ```
 
-## **Security Considerations**
+## 🔄 Customization Options
 
-1. **Use specific image tags** instead of `:latest`
-2. **Configure resource limits** in production
-3. **Enable TLS** for HTTPS traffic
-4. **Use NetworkPolicies** to restrict access
-5. **Regularly update** nginx and base images
+1. **Image Version**: Update `image: registry.k8s.io/ingress-nginx/controller:v1.9.0`
+2. **Additional Arguments**: Add to the args section in the DaemonSet
+3. **Resource Limits**: Add to the container spec
+4. **Node Selectors**: Add to the DaemonSet spec for specific nodes
+5. **Tolerations**: Add if running on tainted nodes
 
-## **Quick Reference**
+## 🆘 Troubleshooting
 
-| Command | Purpose |
-|---------|---------|
-| `kubectl get all -n ingress-nginx` | Check all resources |
-| `kubectl logs -n ingress-nginx deployment/nginx-ingress` | View logs |
-| `kubectl describe pod -n ingress-nginx` | Detailed pod info |
-| `curl http://<IP>:<NodePort>` | Test access |
-| `kubectl edit svc -n ingress-nginx` | Modify service |
+Common issues and solutions:
 
-## **Success Indicators**
-- ✅ Pod status shows `Running`
-- ✅ Service has a `NodePort` assigned
-- ✅ `curl http://<IP>:<NodePort>` returns "NGINX Ingress Controller is working!"
-- ✅ `curl http://<IP>:<NodePort>/healthz` returns "healthy"
+1. **Pods not starting**: Check node port availability (80/443)
+2. **Image pull errors**: Ensure cluster can access registry.k8s.io
+3. **Permission errors**: Verify RBAC resources are properly created
+4. **No IP addresses**: Check if nodes have external/internal IPs
 
-## **Next Steps**
-1. Configure HTTPS/TLS certificates
-2. Set up monitoring and alerts
-3. Configure custom ingress rules for applications
-4. Implement authentication/authorization
-5. Set up logging and analytics
+Check logs:
+```bash
+kubectl describe pod -n ingress-nginx -l app=nginx-ingress
+kubectl logs -n ingress-nginx -l app=nginx-ingress --tail=50
+```
 
----
+## 📚 References
 
-**Note**: This setup is for development/testing. For production, consider using the official Nginx Ingress Controller with proper security configurations.
+- [NGINX Ingress Controller Documentation](https://kubernetes.github.io/ingress-nginx/)
+- [Kubernetes Ingress](https://kubernetes.io/docs/concepts/services-networking/ingress/)
+- [DaemonSet Documentation](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/)
+
+## 📄 License
+
+This configuration is provided as-is. Refer to the official NGINX Ingress Controller documentation for detailed configuration options and best practices.
