@@ -1,4 +1,4 @@
-````
+
 # NGINX Gateway Fabric (Gateway API) + MetalLB — Full Troubleshooting & Fix Log
 
 This README documents the full troubleshooting journey and final fixes for:
