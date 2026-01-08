@@ -412,6 +412,3 @@ kubectl -n nginx-gateway patch svc ngf-nginx-gateway-fabric --type='json' -p='[
 ✅ Routing works as expected when hostnames are configured correctly (or removed)
 
 ```
-
-If you want, I can also generate a **“Quick Start” section** (minimal commands only) at the top so it looks even cleaner for teammates who don’t care about the debugging history.
-```
