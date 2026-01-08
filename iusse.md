@@ -1,4 +1,3 @@
-
 # NGINX Gateway Fabric + MetalLB Troubleshooting Notes (Full Chat Summary)
 
 This README documents everything we did in this session to bring an **NGINX Gateway Fabric (NGF)** Gateway up on a **MetalLB LoadBalancer IP** and make it reachable via **NodePort / External IP**, plus why we sometimes got the wrong page (default nginx) depending on the **Host** header.
@@ -46,7 +45,6 @@ This README documents everything we did in this session to bring an **NGINX Gate
    ```bash
    kubectl -n nginx-gateway get endpoints gateway-service -o wide
    # ENDPOINTS empty
-````
 
 2. `test-gateway-nginx` pod was **Running but not Ready**:
 
