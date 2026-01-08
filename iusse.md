@@ -366,110 +366,201 @@ curl -v http://10.10.0.204:30523/
 ```
 
 ---
-
 ## 9) Cluster Topology Diagrams
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '12px'}}}%%
 
-### 9.1 Internal Cluster Topology
-
-```
 flowchart TB
-  subgraph Cluster[Kubernetes Cluster]
-    direction TB
-
-    subgraph Nodes[Nodes]
-      direction LR
-      M[k8s-master\n10.10.0.200]
-      W1[k8s-worker01\n10.10.0.207]
-      W2[k8s-worker02\n10.10.0.204]
+    %% External Components
+    Client([Client/User])
+    ExternalLB["External Load Balancer<br/>MetalLB<br/>10.10.0.232:80"]
+    
+    %% Cluster Boundary
+    subgraph Cluster[Kubernetes Cluster]
+        direction TB
+        
+        subgraph MasterNode[Master Node]
+            direction TB
+            M1["k8s-master<br/>10.10.0.200"]
+            
+            subgraph ControlPlane[Control Plane]
+                direction TB
+                KAPI["Kubernetes API<br/>Gateway CRDs"]
+                ETCD["etcd"]
+            end
+            
+            subgraph GatewayAPI[Gateway API Resources]
+                direction LR
+                G["Gateway: test-gateway<br/>Listener: 80"]
+                HR["HTTPRoute: app-route<br/>PathPrefix / → test-app:80"]
+            end
+        end
+        
+        subgraph WorkerNodes[Worker Nodes]
+            direction TB
+            
+            subgraph Node1["Worker Node 01 (10.10.0.207)"]
+                direction TB
+                
+                subgraph PodNetwork1[Pod Network - CNI]
+                    Pod1["test-gateway-nginx Pod<br/>192.168.79.89:80<br/>Readyz: 8081<br/>Data Plane"]
+                    
+                    subgraph AppPods1[Application Pods]
+                        App1["test-app Pod<br/>192.168.69.215:80"]
+                    end
+                end
+                
+                KubeProxy1["kube-proxy<br/>(iptables/nftables)"]
+                NodePort1["NodePort: 30523"]
+            end
+            
+            subgraph Node2["Worker Node 02 (10.10.0.204)"]
+                direction TB
+                
+                subgraph PodNetwork2[Pod Network - CNI]
+                    Pod2["NGF Control Plane Pod<br/>192.168.79.86:8443"]
+                    
+                    subgraph AppPods2[Application Pods]
+                        App2["test-app Pod<br/>192.168.79.75:80"]
+                    end
+                end
+                
+                KubeProxy2["kube-proxy"]
+                NodePort2["NodePort: 30523"]
+            end
+        end
+        
+        subgraph Services[Kubernetes Services Layer]
+            direction TB
+            
+            subgraph GatewayServices[Gateway Services]
+                GW_SVC["gateway-service<br/>Type: LoadBalancer<br/>ClusterIP: 10.99.191.190:80<br/>ExternalIP: 10.10.0.232:80<br/>NodePort: 30523"]
+            end
+            
+            subgraph AppServices[Application Services]
+                APP_SVC["test-app Service<br/>ClusterIP: 10.99.82.73:80"]
+            end
+            
+            subgraph ControlPlaneServices[Control Plane Services]
+                CP_SVC["ngf-nginx-gateway-fabric<br/>ClusterIP: 10.100.66.136:443<br/>TargetPort: 8443"]
+            end
+        end
     end
-
-    subgraph PodNet[Pod Network (CNI)\n192.168.x.x]
-      direction LR
-      DP[test-gateway-nginx Pod\n192.168.79.89\nlistens:80\nreadyz:8081]
-      APP1[test-app Pod\n192.168.69.215:80]
-      APP2[test-app Pod\n192.168.79.75:80]
-      CP[ngf-nginx-gateway-fabric Pod\n192.168.79.86\ngrpc:8443]
-    end
-
-    subgraph Services[Services]
-      direction TB
-      GW_SVC[gateway-service\nClusterIP 10.99.191.190:80\nLB 10.10.0.232:80\nNodePort 30523]
-      APP_SVC[test-app\nClusterIP 10.99.82.73:80]
-      CP_SVC[ngf-nginx-gateway-fabric\nClusterIP 10.100.66.136:443\n-> targetPort 8443]
-    end
-
-    subgraph GatewayAPI[Gateway API]
-      direction TB
-      GW[Gateway test-gateway\nlistener:80]
-      HR[HTTPRoute app-route\nPathPrefix / -> test-app:80]
-    end
-  end
-
-  GW --> HR
-  HR --> APP_SVC
-  APP_SVC --> APP1
-  APP_SVC --> APP2
-
-  GW_SVC --> DP
-  DP -->|proxy_pass| APP_SVC
-
-  DP -->|nginx-agent gRPC| CP_SVC
-  CP_SVC --> CP
+    
+    %% Data Flow - External Access
+    Client -->|"HTTP Request :80"| ExternalLB
+    ExternalLB -->|"Load Balance"| NodePort1
+    ExternalLB -->|"Load Balance"| NodePort2
+    
+    %% NodePort to Service
+    NodePort1 -->|"Forward"| KubeProxy1
+    NodePort2 -->|"Forward"| KubeProxy2
+    
+    KubeProxy1 -->|"DNAT to Service"| GW_SVC
+    KubeProxy2 -->|"DNAT to Service"| GW_SVC
+    
+    %% Service to Data Plane Pod
+    GW_SVC -->|"Endpoint: 192.168.79.89:80"| Pod1
+    
+    %% Data Plane to Application
+    Pod1 -->|"proxy_pass to"| APP_SVC
+    APP_SVC -->|"Load Balance"| App1
+    APP_SVC -->|"Load Balance"| App2
+    
+    %% Control Plane Flow
+    KAPI -->|"Watches & Manages"| GatewayAPI
+    GatewayAPI -->|"Configures"| CP_SVC
+    CP_SVC -->|"gRPC :8443"| Pod2
+    Pod2 -->|"Renders Nginx Config"| Pod1
+    Pod1 -->|"nginx-agent gRPC"| CP_SVC
+    
+    %% Visual Styling
+    classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef master fill:#f3e5f5,stroke:#4a148c
+    classDef worker fill:#e8f5e8,stroke:#1b5e20
+    classDef service fill:#fff3e0,stroke:#e65100
+    classDef pod fill:#fce4ec,stroke:#880e4f
+    classDef gateway fill:#e0f2f1,stroke:#004d40
+    classDef control fill:#fff8e1,stroke:#f57f17
+    
+    class Client,ExternalLB external
+    class MasterNode,GatewayAPI master
+    class WorkerNodes,AppPods1,AppPods2 worker
+    class Services service
+    class Pod1,Pod2,App1,App2 pod
+    class GatewayServices gateway
+    class ControlPlane,ControlPlaneServices,Pod2 control
 ```
 
----
+## Alternative Simplified Version
 
-### 9.2 Request Flow (Client -> LB -> NodePort -> Service -> Pod -> Backend)
+If you prefer a simpler version focusing on the core components:
 
-```
-sequenceDiagram
-  participant Client as Client
-  participant LB as MetalLB External IP (10.10.0.232)
-  participant Node as Any Node (NodePort 30523)
-  participant KP as kube-proxy (iptables/nft)
-  participant SVC as gateway-service (10.99.191.190:80)
-  participant DP as test-gateway-nginx Pod (192.168.79.89:80)
-  participant APP as test-app Service (10.99.82.73:80)
-  participant Pods as test-app Pods
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '11px'}}}%%
 
-  Client->>LB: HTTP :80
-  LB->>Node: forwards to NodePort 30523
-  Node->>KP: kube-proxy DNAT rules
-  KP->>SVC: service VIP selected
-  SVC->>DP: forward to endpoint podIP:80
-  DP->>APP: proxy_pass to test-app service
-  APP->>Pods: load-balance to app pods
-  Pods-->>Client: response
-```
-
----
-
-### 9.3 Control Plane vs Data Plane (NGF)
-
-```
 flowchart LR
-  subgraph CP[Control Plane]
-    CPOD[ngf-nginx-gateway-fabric Pod\n192.168.79.86]
-    CSVC[ngf-nginx-gateway-fabric SVC\n10.100.66.136:443 -> 8443]
-  end
-
-  subgraph DP[Data Plane]
-    DPOD[test-gateway-nginx Pod\n192.168.79.89\nlisten:80\nreadyz:8081]
-    GSVC[gateway-service\n10.99.191.190:80\nLB 10.10.0.232:80\nNodePort 30523]
-  end
-
-  subgraph API[Gateway API]
-    G[Gateway]
-    R[HTTPRoute]
-  end
-
-  G --> R
-  CPOD -->|renders nginx config| DPOD
-  DPOD -->|nginx-agent gRPC| CSVC --> CPOD
-  GSVC --> DPOD
+    %% Left: External
+    Client([Client]) --> LB["MetalLB LB<br/>10.10.0.232:80"]
+    
+    %% Middle: Cluster
+    subgraph Cluster["Kubernetes Cluster"]
+        LB --> NodePort["NodePort 30523"]
+        
+        subgraph Services["Service Layer"]
+            GW_SVC["gateway-service<br/>10.99.191.190:80"]
+            APP_SVC["test-app Service<br/>10.99.82.73:80"]
+            CP_SVC["NGF CP Service<br/>10.100.66.136:443"]
+        end
+        
+        subgraph DataPlane["Data Plane"]
+            DP["test-gateway-nginx Pod<br/>192.168.79.89:80"]
+        end
+        
+        subgraph AppPods["Application Pods"]
+            AP1["test-app Pod<br/>192.168.69.215"]
+            AP2["test-app Pod<br/>192.168.79.75"]
+        end
+        
+        subgraph ControlPlane["Control Plane"]
+            CP["ngf-nginx-gateway-fabric Pod<br/>192.168.79.86"]
+        end
+    end
+    
+    %% Right: Gateway API
+    subgraph GatewayAPI["Gateway API"]
+        GW["Gateway: test-gateway"]
+        HR["HTTPRoute: app-route"]
+    end
+    
+    %% Connections
+    NodePort --> GW_SVC
+    GW_SVC --> DP
+    DP --> APP_SVC
+    APP_SVC --> AP1 & AP2
+    
+    GW --> HR
+    HR --> CP
+    CP -.->|gRPC config| DP
+    DP -.->|nginx-agent| CP_SVC --> CP
 ```
 
----
+
+
+3. **Key Components Explained**:
+   - **MetalLB**: Provides LoadBalancer services in bare-metal clusters
+   - **Gateway API**: Modern Kubernetes networking API (replacing Ingress)
+   - **NGF (Nginx Gateway Fabric)**: Control plane for Nginx-based gateways
+   - **kube-proxy**: Handles service discovery and load balancing at node level
+   - **CNI**: Container Network Interface providing pod networking
+
+4. **Request Flow**:
+   1. Client → MetalLB LoadBalancer
+   2. LoadBalancer → NodePort on any worker node
+   3. kube-proxy DNAT → gateway-service ClusterIP
+   4. Service → test-gateway-nginx Pod (Data Plane)
+   5. Nginx proxy_pass → test-app Service
+   6. Service → Application Pods
 
 ## 10) Final Status
 
