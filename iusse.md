@@ -371,7 +371,7 @@ curl -v http://10.10.0.204:30523/
 
 ### 9.1 Internal Cluster Topology
 
-```mermaid
+```
 flowchart TB
   subgraph Cluster[Kubernetes Cluster]
     direction TB
@@ -421,7 +421,7 @@ flowchart TB
 
 ### 9.2 Request Flow (Client -> LB -> NodePort -> Service -> Pod -> Backend)
 
-```mermaid
+```
 sequenceDiagram
   participant Client as Client
   participant LB as MetalLB External IP (10.10.0.232)
@@ -446,7 +446,7 @@ sequenceDiagram
 
 ### 9.3 Control Plane vs Data Plane (NGF)
 
-```mermaid
+```
 flowchart LR
   subgraph CP[Control Plane]
     CPOD[ngf-nginx-gateway-fabric Pod\n192.168.79.86]
