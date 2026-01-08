@@ -163,6 +163,51 @@ HTTP/1.1 200 OK
 ```
 
 ---
+## Cluster Topology (Inside)
+
+### 1) Nodes + CNI + Service Routing (Cluster Internals)
+
+flowchart TB
+  subgraph Cluster[Kubernetes Cluster]
+    direction TB
+
+    subgraph Nodes[Nodes]
+      direction LR
+      M[k8s-master\n10.10.0.200]
+      W1[k8s-worker01\n10.10.0.207]
+      W2[k8s-worker02\n10.10.0.204]
+    end
+
+    subgraph CNI[Pod Network (CNI)\n192.168.x.x]
+      direction LR
+      P1[test-gateway-nginx Pod\n192.168.79.89\n(listen:80,8081)] 
+      P2[test-app Pod #1\n192.168.69.215:80]
+      P3[test-app Pod #2\n192.168.79.75:80]
+      CP[ngf-nginx-gateway-fabric Pod\n192.168.79.86\n(target:8443)]
+    end
+
+    subgraph Services[Services (ClusterIP)]
+      direction TB
+      SVC_GW[gateway-service\nClusterIP: 10.99.191.190:80\n-> targetPort:80]
+      SVC_APP[test-app\nClusterIP: 10.99.82.73:80]
+      SVC_CP[ngf-nginx-gateway-fabric\nClusterIP: 10.100.66.136:443\n-> targetPort:8443]
+    end
+
+    subgraph ControlPlane[Gateway API Objects]
+      direction TB
+      GW[Gateway: test-gateway\nlistener:80]
+      HR[HTTPRoute: app-route\nmatch: / -> test-app:80]
+    end
+  end
+
+  %% relationships
+  GW --> HR
+  HR --> SVC_APP
+  SVC_GW --> P1
+  SVC_APP --> P2
+  SVC_APP --> P3
+  P1 --> SVC_CP
+  SVC_CP --> CP
 
 ## ✅ Success Criteria
 
