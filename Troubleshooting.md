@@ -1,138 +1,326 @@
-Kubernetes NGINX Gateway Fabric + MetalLB Troubleshooting Guide
-Overview
+````
+# NGINX Gateway Fabric (Gateway API) + MetalLB — Full Troubleshooting & Fix Log
 
-This document describes the full setup, debugging process, and resolution of issues encountered while deploying NGINX Gateway Fabric with Gateway API, MetalLB, and application routing in Kubernetes.
+This README documents the full troubleshooting journey and final fixes for:
+- NGINX Gateway Fabric (NGF) control-plane + data-plane
+- Gateway API resources (Gateway + HTTPRoute)
+- MetalLB LoadBalancer IP advertisement (Layer2)
+- kube-proxy / nftables NodePort programming
+- Host-based routing behaviors (why some Host headers showed the wrong page)
 
-It covers:
+---
 
-Namespace and resource placement
+## Table of Contents
+- [Environment](#environment)
+- [Resources Overview](#resources-overview)
+- [Initial Symptoms](#initial-symptoms)
+- [Root Causes Found](#root-causes-found)
+- [Fixes Applied (Chronological)](#fixes-applied-chronological)
+  - [A) Service selector & empty endpoints](#a-service-selector--empty-endpoints)
+  - [B) Data-plane not listening on expected ports](#b-data-plane-not-listening-on-expected-ports)
+  - [C) NGF control-plane Service targetPort mismatch (grpc)](#c-ngf-control-plane-service-targetport-mismatch-grpc)
+  - [D) gateway-service targetPort mismatch](#d-gateway-service-targetport-mismatch)
+  - [E) Hostname routing confusion](#e-hostname-routing-confusion)
+- [Verification Commands](#verification-commands)
+- [Final Working Config (Recommended)](#final-working-config-recommended)
+- [Common Pitfalls & Notes](#common-pitfalls--notes)
 
-Service & Endpoint issues
+---
 
-MetalLB networking problems
+## Environment
 
-Gateway API (Gateway / HTTPRoute) behavior
+- Nodes:
+  - `k8s-master` (10.10.0.200)
+  - `k8s-worker01` (10.10.0.207)
+  - `k8s-worker02` (10.10.0.204)
+- Pod CIDR range: `192.168.x.x`
+- LoadBalancer: **MetalLB (layer2)**
+- kube-proxy: DaemonSet running on all nodes
+- NGINX Gateway Fabric:
+  - control plane: `ngf-nginx-gateway-fabric`
+  - data plane: `test-gateway-nginx` (NGINX Plus)
 
-Host-based routing pitfalls
+---
 
-Final working configuration
+## Resources Overview
 
-Cluster Environment
+### Services
+- `nginx-gateway/gateway-service` (LoadBalancer)
+  - External IP (MetalLB): `10.10.0.232`
+  - NodePort: `30523` (for port 80)
+- `nginx-gateway/ngf-nginx-gateway-fabric` (LoadBalancer)
+  - ClusterIP: `10.100.66.136`
+  - External IP (MetalLB): `10.10.0.231`
+  - Used by NGINX Agent / control-plane gRPC
 
-Kubernetes version: v1.30.x
+### Gateway API
+- `nginx-gateway/Gateway test-gateway`
+  - Listener: HTTP :80
+- `nginx-gateway/HTTPRoute app-route`
+  - Backend: `test-app:80`
 
-Nodes:
+---
 
-k8s-master (10.10.0.200)
+## Initial Symptoms
 
-k8s-worker01 (10.10.0.207)
+### 1) `gateway-service` had no endpoints
+```bash
+kubectl -n nginx-gateway get endpoints gateway-service -o wide
+# ENDPOINTS was empty
+````
 
-k8s-worker02 (10.10.0.204)
+### 2) Data-plane pod was Running but NOT Ready
 
-CNI: Pod CIDRs 192.168.x.x
+Readiness probe failed:
 
-LoadBalancer implementation: MetalLB (Layer2)
+* `http://<pod-ip>:8081/readyz` connection refused
 
-Gateway Controller: NGINX Gateway Fabric v2.3.0 (NGINX Plus)
+### 3) External connectivity failed (NodePort / LoadBalancer)
 
-Namespaces Used
-Namespace	Purpose
-nginx-gateway	Gateway controller, Gateway, HTTPRoutes, app
-metallb-system	MetalLB
-kube-system	Core components
-default	Legacy/testing resources
+Examples:
 
-⚠️ Important Rule
-Kubernetes resources must live in the same namespace to work together:
+* `curl http://10.10.0.232:80` → connection refused
+* `curl http://10.10.0.204:30523` → connection refused
 
-Deployment
+### 4) NGINX Agent could not connect to control plane
 
-Service
+Logs showed repeated timeouts to:
 
-ConfigMap
+* `dial tcp 10.100.66.136:443: i/o timeout`
 
-HTTPRoute
+### 5) Host header changed the response unexpectedly
 
-Gateway
+* `Host: 10.10.0.232` returned the app page ✅
+* `Host: anything.local` returned the default nginx welcome page ❌
 
-Initial Problems Encountered
-1. Ingress / Gateway Not Working
+---
 
-Services had no endpoints
+## Root Causes Found
 
-Pods stuck in ContainerCreating
+1. **Empty endpoints** because Service selector/targetPort didn’t match the real data-plane ports.
+2. **Data-plane was not listening on the Service targetPort** (Service sent traffic to 8080 but container listened elsewhere).
+3. **Control-plane service (`ngf-nginx-gateway-fabric`) was pointing to the wrong targetPort**, breaking NG Agent ↔ control-plane connectivity.
+4. **Hostname routing rules created different NGINX server blocks**, so different Host headers hit different server blocks.
 
-Requests returned:
+---
 
-503
+## Fixes Applied (Chronological)
 
-404
+### A) Service selector & empty endpoints
 
-connection refused
+Check service and endpoints:
 
-2. Service ClusterIP Conflicts
+```bash
+kubectl -n nginx-gateway describe svc gateway-service
+kubectl -n nginx-gateway get endpoints gateway-service -o wide
+```
 
-Errors such as:
+If endpoints are empty, verify the selector matches the pod labels:
 
-failed to allocate IP: provided IP is already allocated
+```bash
+kubectl -n nginx-gateway get pods --show-labels | grep test-gateway-nginx
+kubectl -n nginx-gateway get svc gateway-service -o yaml
+```
 
+> ✅ After aligning selectors/labels and recreating pods, endpoints began to appear.
 
-Cause:
-Hardcoded clusterIP values in Service YAML.
+---
 
-Fix:
-Remove clusterIP field and let Kubernetes assign it automatically.
+### B) Data-plane not listening on expected ports
 
-MetalLB Issues
-Symptoms
+We inspected listening ports inside the data-plane container:
 
-LoadBalancer IP reachable by ARP but refused connections
+```bash
+kubectl -n nginx-gateway exec -it deploy/test-gateway-nginx -- sh -lc '
+(netstat -lnt 2>/dev/null || (apk add --no-cache net-tools >/dev/null 2>&1 && netstat -lnt)) \
+| egrep ":(80|8080|8081)\b"'
+```
 
-ip neigh showed FAILED
+Result showed the container listens on:
 
-NodePort not responding
+* `:80`
+* `:8081` (readyz)
 
-Diagnosis
+So the Service **must target port 80** (not 8080).
 
-Service selector did not match any Pods
+---
 
-Endpoints were empty
+### C) NGF control-plane Service targetPort mismatch (grpc)
 
-TargetPort mismatch
+The NG Agent logs showed it tried to connect to:
 
-Fixes Applied
+* `10.100.66.136:443` (service clusterIP)
 
-Correct Service selectors
+But the Service was not targeting the correct control-plane port.
 
-kubectl patch svc gateway-service -n nginx-gateway \
---type=merge -p '
-spec:
-  selector:
-    app.kubernetes.io/instance: ngf
-    app.kubernetes.io/name: test-gateway-nginx
-'
+We confirmed the endpoint target for `ngf-nginx-gateway-fabric`:
 
+```bash
+kubectl -n nginx-gateway get endpoints ngf-nginx-gateway-fabric -o wide
+```
 
-Fix targetPort
-Pods were listening on port 80, but Service used 8080.
+Fix applied: patch the control-plane Service to map:
 
-kubectl patch svc gateway-service -n nginx-gateway --type=json -p='[
+* `port 443 -> targetPort 8443`
+
+```bash
+kubectl -n nginx-gateway patch svc ngf-nginx-gateway-fabric --type='json' -p='[
+  {
+    "op": "replace",
+    "path": "/spec/ports",
+    "value": [
+      {
+        "name": "grpc",
+        "port": 443,
+        "targetPort": 8443,
+        "protocol": "TCP"
+      }
+    ]
+  }
+]'
+```
+
+Verify:
+
+```bash
+kubectl -n nginx-gateway get svc ngf-nginx-gateway-fabric -o wide
+kubectl -n nginx-gateway get endpoints ngf-nginx-gateway-fabric -o wide
+# should show something like: <pod-ip>:8443
+```
+
+---
+
+### D) gateway-service targetPort mismatch
+
+After confirming the data-plane listens on **:80**, we patched `gateway-service` targetPorts to **80**.
+
+```bash
+kubectl -n nginx-gateway patch svc gateway-service --type='json' -p='[
   {"op":"replace","path":"/spec/ports/0/targetPort","value":80},
   {"op":"replace","path":"/spec/ports/1/targetPort","value":80}
 ]'
+```
 
+Verify endpoints now show `:80`:
 
-Verify Endpoints
+```bash
+kubectl -n nginx-gateway get ep gateway-service -o wide
+```
 
-kubectl get endpoints gateway-service -n nginx-gateway
+Now connectivity succeeded:
 
+```bash
+curl -v http://10.10.0.232:80/
+curl -v http://10.10.0.204:30523/
+curl -v http://10.99.191.190:80/
+```
 
-Result:
+---
 
-192.168.xx.xx:80
+### E) Hostname routing confusion
 
-Gateway API Configuration
-Gateway
+#### What we observed
+
+* `curl http://10.10.0.232/ -H 'Host: 10.10.0.232'` returned app ✅
+* `curl http://10.10.0.232/ -H 'Host: anything.local'` returned nginx welcome ❌
+
+#### Why
+
+When you set `spec.hostnames` in HTTPRoute, NGF generates a server block for that hostname.
+Requests that don’t match that hostname may fall into a different server (default or regex host),
+which can serve a different response.
+
+#### The “correct” choice depends on what you want:
+
+##### Option 1 (Recommended): accept ANY host header
+
+Do **not** set `spec.hostnames` in HTTPRoute.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app-route
+  namespace: nginx-gateway
+spec:
+  parentRefs:
+  - name: test-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: test-app
+      port: 80
+```
+
+##### Option 2: enforce a hostname (requires DNS / hosts file)
+
+If you set:
+
+```yaml
+spec:
+  hostnames:
+  - app.local
+```
+
+Then your test MUST include:
+
+```bash
+curl http://10.10.0.232/ -H 'Host: app.local'
+```
+
+> If you want “all URLs work”, you need Option 1 (no hostnames),
+> OR you need DNS to always send the same hostname.
+
+---
+
+## Verification Commands
+
+### 1) Confirm services & endpoints
+
+```bash
+kubectl -n nginx-gateway get svc -o wide
+kubectl -n nginx-gateway get endpoints -o wide
+```
+
+### 2) Confirm data-plane listens on 80
+
+```bash
+kubectl -n nginx-gateway exec -it deploy/test-gateway-nginx -- sh -lc '
+netstat -lnt 2>/dev/null || (apk add --no-cache net-tools >/dev/null 2>&1 && netstat -lnt)'
+```
+
+### 3) Inspect generated NGINX config (server blocks, proxy_pass)
+
+```bash
+kubectl -n nginx-gateway exec -it deploy/test-gateway-nginx -- sh -lc \
+"nginx -T 2>/dev/null | egrep -n 'listen 80|server_name|proxy_pass|upstream' | head -200"
+```
+
+### 4) Confirm Gateway/HTTPRoute status
+
+```bash
+kubectl -n nginx-gateway describe gateway test-gateway
+kubectl -n nginx-gateway describe httproute app-route
+```
+
+### 5) kube-proxy / nftables sanity checks (NodePort)
+
+```bash
+kubectl -n kube-system get ds kube-proxy -o wide
+kubectl -n kube-system get pods -l k8s-app=kube-proxy -o wide
+sudo nft list ruleset | egrep "dport 30523|KUBE-EXTERNAL-SERVICES" -n
+```
+
+---
+
+## Final Working Config (Recommended)
+
+### Gateway
+
+```yaml
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
@@ -147,8 +335,11 @@ spec:
     allowedRoutes:
       namespaces:
         from: All
+```
 
-HTTPRoute (Final Correct Version)
+### HTTPRoute (no hostnames)
+
+```yaml
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -157,7 +348,6 @@ metadata:
 spec:
   parentRefs:
   - name: test-gateway
-    sectionName: http
   rules:
   - matches:
     - path:
@@ -166,135 +356,62 @@ spec:
     backendRefs:
     - name: test-app
       port: 80
+```
 
-Hostname Routing Pitfall (IMPORTANT)
-What Happened
+### Key Service Fixes
 
-Requests with:
+#### gateway-service targets 80
 
-Host: anything.local
-
-
-returned NGINX default page
-
-Requests with:
-
-Host: 10.10.0.232
-
-
-worked correctly
-
-Why
-
-When hostnames are defined in HTTPRoute, NGINX Gateway Fabric creates multiple server blocks:
-
-One for the hostname
-
-One default server
-
-If the Host header does not match exactly, traffic goes to default server.
-
-Fix Options
-Option A — No hostname restriction (recommended for IP access)
-
-Remove hostnames entirely:
-
-kubectl patch httproute app-route --type=json -p='[
-  {"op":"remove","path":"/spec/hostnames"}
+```bash
+kubectl -n nginx-gateway patch svc gateway-service --type='json' -p='[
+  {"op":"replace","path":"/spec/ports/0/targetPort","value":80},
+  {"op":"replace","path":"/spec/ports/1/targetPort","value":80}
 ]'
+```
 
-Option B — Enforce hostname
-spec:
-  hostnames:
-  - app.local
+#### control-plane service maps 443 -> 8443
 
+```bash
+kubectl -n nginx-gateway patch svc ngf-nginx-gateway-fabric --type='json' -p='[
+  {
+    "op": "replace",
+    "path": "/spec/ports",
+    "value": [
+      {"name":"grpc","port":443,"targetPort":8443,"protocol":"TCP"}
+    ]
+  }
+]'
+```
 
-And test with:
+---
 
-curl http://10.10.0.232 -H "Host: app.local"
+## Common Pitfalls & Notes
 
-Verifying NGINX Internals
-Check listening ports
-kubectl exec -n nginx-gateway deploy/test-gateway-nginx -- \
-netstat -lnt
+* `kubectl describe` does **NOT** support `-o wide` (that’s only for `kubectl get`).
+* If `endpoints` is empty:
 
+  * selector mismatch OR pods not ready OR wrong port name/targetPort
+* If NGINX Agent can’t connect:
 
-Expected:
+  * verify `ngf-nginx-gateway-fabric` Service targetPort matches real pod port
+* If different Host headers return different pages:
 
-0.0.0.0:80
-0.0.0.0:8081
+  * you likely created multiple server blocks via `spec.hostnames`
+* If `curl /foo` returns 404:
 
-Inspect generated NGINX config
-kubectl exec -n nginx-gateway deploy/test-gateway-nginx -- \
-nginx -T
+  * that may be **your app** returning 404 (not the gateway). Test your app directly via service.
 
+---
 
-Look for:
+## Result
 
-server_name
+✅ MetalLB LB IP works
+✅ NodePort works
+✅ Data-plane is Ready and serving traffic
+✅ Gateway + HTTPRoute are Accepted / ResolvedRefs
+✅ Routing works as expected when hostnames are configured correctly (or removed)
 
-listen 80
+```
 
-proxy_pass http://nginx-gateway_test-app_80
-
-Final Working State
-External Access
-curl http://10.10.0.232/
-
-NodePort Access
-curl http://10.10.0.204:30523/
-
-Internal Cluster Access
-kubectl run tmp --rm -it --image=curlimages/curl -- \
-curl http://gateway-service.nginx-gateway.svc.cluster.local
-
-Result
-
-✅ Requests are routed to test-app
-✅ Gateway API working
-✅ MetalLB LoadBalancer working
-✅ No 503 / connection refused
-
-Key Lessons Learned
-
-Service selector must match Pod labels
-
-targetPort must match container port
-
-MetalLB only advertises IP — kube-proxy still matters
-
-Gateway API is Host-header sensitive
-
-Remove hostnames if accessing by IP
-
-Always check Endpoints before debugging networking
-
-Recommended Best Practice Layout
-nginx-gateway/
-├── gateway.yaml
-├── httproute.yaml
-├── app-deployment.yaml
-├── app-service.yaml
-
-
-Keep Gateway + HTTPRoute + Service + Deployment in same namespace
-
-Use hostnames only when you control DNS
-
-Status
-
-🟢 Resolved & Stable
-
-If you want:
-
-TLS
-
-HTTPS listener
-
-Multiple apps
-
-Path-based routing
-
-Production hardening
-
-Just ask.
+If you want, I can also generate a **“Quick Start” section** (minimal commands only) at the top so it looks even cleaner for teammates who don’t care about the debugging history.
+```
